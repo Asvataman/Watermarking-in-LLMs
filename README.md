@@ -46,13 +46,4 @@ To ensure efficient collaboration, tasks are divided as follows:
   - Implement the statistical watermark detection algorithm and evaluation metrics.
   - Create a text classification system to distinguish between watermarked and non-watermarked content.
 
----
 
-### Support
-
-For any issues or questions regarding this project, please contact:
-
-- **Sriman Sathish (SXS240032)**: [email@example.com]
-- **Asvataman (AXV230014)**: [email@example.com]
-
-We are committed to providing assistance and addressing any concerns promptly.
