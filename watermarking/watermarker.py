@@ -2,6 +2,7 @@ import numpy as np
 import hashlib
 import tiktoken
 from typing import List, Dict, Tuple, Set, Optional
+from config.setting import DEFAULT_GAMMA, DEFAULT_DELTA, DEFAULT_SEED, VOCABULARY_SIZE
 
 class Watermarker:
     """
@@ -16,10 +17,10 @@ class Watermarker:
     
     def __init__(
         self, 
-        vocabulary_size: int = 100000,
-        gamma: float = 0.5,
-        delta: float = 2.0,
-        seed: Optional[int] = None,
+        vocabulary_size: int = VOCABULARY_SIZE,
+        gamma: float = DEFAULT_GAMMA,
+        delta: float = DEFAULT_DELTA,
+        seed: Optional[int] = DEFAULT_SEED,
         encoding_name: str = "cl100k_base"  # GPT-4 tokenizer
     ):
         """
@@ -145,7 +146,7 @@ class AzureWatermarkedClient:
         """
         if not self.watermarking_enabled:
             # If watermarking is disabled, just pass through to the Azure client
-            return await self.azure_client.chat.completions.create(
+            return await self.azure_client.get_chat_response(
                 messages=messages,
                 **kwargs
             )
@@ -172,7 +173,7 @@ class AzureWatermarkedClient:
             kwargs["logit_bias"] = logit_bias
         
         # Generate completion with the biased distribution
-        return await self.azure_client.chat.completions.create(
+        return await self.azure_client.get_chat_response(
             messages=messages,
             **kwargs
         )

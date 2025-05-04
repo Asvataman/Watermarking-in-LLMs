@@ -13,7 +13,7 @@ DEFAULT_Z_THRESHOLD = 4.0  # Z-score threshold for detection
 
 # Tokenizer settings
 TOKENIZER_NAME = "cl100k_base"  # GPT-4 tokenizer
-VOCABULARY_SIZE = 100000  # Approximate vocabulary size
+VOCABULARY_SIZE = 500  # Approximate vocabulary size
 
 # Detection settings
 MIN_TOKENS_FOR_DETECTION = 30  # Minimum number of tokens needed for reliable detection

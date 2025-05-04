@@ -101,11 +101,13 @@ def main():
                     temperature=0.7,
                     max_tokens=800
                 )
+                print(response)
                 
                 return response.choices[0].message.content
             
             # Create the chat input
             create_chat_input(lambda user_input: process_user_input(user_input, get_response))
+            display_chat_messages()
         else:
             st.warning("Please configure your Azure OpenAI credentials to use the chat interface.")
     

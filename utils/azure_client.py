@@ -108,4 +108,4 @@ class AzureOpenAIClient:
             Response content as a string
         """
         response = await self.get_completion(messages, **kwargs)
-        return response.choices[0].message.content
+        return response
