@@ -1,132 +1,92 @@
 import streamlit as st
-import time
+from typing import Dict
+from config import (
+    WATERMARK_GAMMA,
+    WATERMARK_DELTA,
+    DETECTION_THRESHOLD,
+    WATERMARK_SEED
+)
 
-def create_sidebar():
-    """Create the sidebar with watermarking settings."""
-    st.sidebar.title("LLM Watermarking")
-    st.sidebar.markdown("""
-    This application demonstrates the watermarking technique described in the paper 
-    "A Watermark for Large Language Models" by Kirchenbauer et al. (2023).
-    """)
+class Sidebar:
+    """Sidebar for the Streamlit app with watermarking settings."""
     
-    # Main settings section
-    st.sidebar.header("Settings")
+    def __init__(self):
+        """Initialize the sidebar."""
+        pass
     
-    # Watermarking toggle
-    watermarking_enabled = st.sidebar.toggle(
-        "Enable Watermarking",
-        value=st.session_state.get("watermarking_enabled", True),
-        help="Toggle watermarking on or off for generated text"
-    )
-    
-    # Update the session state
-    if watermarking_enabled != st.session_state.get("watermarking_enabled", True):
-        st.session_state.watermarking_enabled = watermarking_enabled
-    
-    # Advanced settings
-    with st.sidebar.expander("Advanced Settings"):
-        # Watermarking parameters
-        gamma = st.slider(
-            "Gamma (Green Token Ratio)",
-            min_value=0.1,
-            max_value=0.9,
-            value=st.session_state.get("watermark_gamma", 0.5),
-            step=0.1,
-            help="Fraction of tokens marked as 'green' (watermark tokens)"
+    def render(self) -> Dict:
+        """
+        Render the sidebar with controls for watermark parameters.
+        
+        Returns:
+            Dictionary of watermark parameters
+        """
+        st.sidebar.title("LLM Watermarking")
+        st.sidebar.markdown("## About")
+        st.sidebar.markdown(
+            "This application demonstrates watermarking for large language models, "
+            "based on the paper by Kirchenbauer et al. The watermark works by subtly "
+            "biasing the model's token selection process, creating a statistical pattern "
+            "that can be detected later."
         )
         
-        delta = st.slider(
-            "Delta (Logit Bias)",
-            min_value=0.5,
-            max_value=5.0,
-            value=st.session_state.get("watermark_delta", 2.0),
+        st.sidebar.markdown("## Watermark Parameters")
+        
+        # Add parameters control
+        gamma = st.sidebar.slider(
+            "Green List Size (γ)", 
+            min_value=0.1, 
+            max_value=0.9, 
+            value=WATERMARK_GAMMA,
+            step=0.05,
+            help="Proportion of vocabulary assigned to the green list (0-1)"
+        )
+        
+        delta = st.sidebar.slider(
+            "Logit Bias (δ)", 
+            min_value=0.1, 
+            max_value=10.0, 
+            value=WATERMARK_DELTA,
             step=0.5,
-            help="Logit bias applied to green tokens"
+            help="Bias added to green list token logits - higher values create a stronger watermark"
         )
         
-        seed = st.number_input(
-            "Watermark Seed",
-            min_value=1,
-            max_value=100000,
-            value=st.session_state.get("watermark_seed", 42),
-            help="Random seed for the watermark key"
-        )
-        
-        z_threshold = st.slider(
-            "Z-threshold (Detection)",
-            min_value=1.0,
-            max_value=10.0,
-            value=st.session_state.get("z_threshold", 4.0),
+        threshold = st.sidebar.slider(
+            "Detection Threshold (z-score)", 
+            min_value=1.0, 
+            max_value=10.0, 
+            value=DETECTION_THRESHOLD,
             step=0.5,
             help="Z-score threshold for watermark detection"
         )
         
-        # Update the session state
-        if gamma != st.session_state.get("watermark_gamma", 0.5):
-            st.session_state.watermark_gamma = gamma
+        # Advanced settings in an expander
+        with st.sidebar.expander("Advanced Settings"):
+            seed = st.number_input(
+                "Watermark Seed", 
+                min_value=0, 
+                max_value=9999999, 
+                value=WATERMARK_SEED,
+                help="Seed for the watermark hash function"
+            )
             
-        if delta != st.session_state.get("watermark_delta", 2.0):
-            st.session_state.watermark_delta = delta
-            
-        if seed != st.session_state.get("watermark_seed", 42):
-            st.session_state.watermark_seed = seed
-            
-        if z_threshold != st.session_state.get("z_threshold", 4.0):
-            st.session_state.z_threshold = z_threshold
-    
-    # Information section
-    with st.sidebar.expander("About Watermarking"):
-        st.markdown("""
-        ### How It Works
+            st.markdown(
+                "This implementation uses a simplified approach where only the immediately preceding "
+                "token determines the green list for the current token. This matches the basic "
+                "approach described in the paper and ensures consistency between generation and detection."
+            )
         
-        **Watermarking** works by subtly biasing the LLM's generation process:
+        # Add info about the paper
+        st.sidebar.markdown("## Reference")
+        st.sidebar.markdown(
+            "Kirchenbauer, J., Geiping, J., Wen, Y., Katz, J., Miers, I., & Goldstein, T. (2023). "
+            "A Watermark for Large Language Models. arXiv:2301.10226"
+        )
         
-        1. Using a secret key, tokens are divided into "green" and "red" lists
-        2. The model is biased to slightly prefer green tokens during generation
-        3. This creates a statistical pattern detectable with the right key
-        
-        **Detection** analyzes the text to find if green tokens appear more frequently 
-        than would be expected by chance.
-        
-        ### Parameters
-        
-        - **Gamma**: Controls the fraction of tokens marked as "green"
-        - **Delta**: Controls the strength of the bias toward green tokens
-        - **Z-threshold**: Controls detection sensitivity (higher = fewer false positives)
-        
-        ### Use Cases
-        
-        - Verify content authenticity
-        - Detect AI-generated misinformation
-        - Attribution for AI-generated content
-        - Academic integrity
-        """)
-    
-    # Clear chat button
-    if st.sidebar.button("Clear Chat"):
-        st.session_state.messages = []
-        
-        # Clear any analysis states
-        for key in list(st.session_state.keys()):
-            if key.startswith("analysis_"):
-                del st.session_state[key]
-                
-        st.rerun()
-
-
-def initialize_sidebar_state():
-    """Initialize session state variables for the sidebar."""
-    if "watermarking_enabled" not in st.session_state:
-        st.session_state.watermarking_enabled = True
-        
-    if "watermark_gamma" not in st.session_state:
-        st.session_state.watermark_gamma = 0.5
-        
-    if "watermark_delta" not in st.session_state:
-        st.session_state.watermark_delta = 2.0
-        
-    if "watermark_seed" not in st.session_state:
-        st.session_state.watermark_seed = 42
-        
-    if "z_threshold" not in st.session_state:
-        st.session_state.z_threshold = 4.0
+        # Return parameters
+        return {
+            "gamma": gamma,
+            "delta": delta,
+            "threshold": threshold,
+            "seed": seed
+        }

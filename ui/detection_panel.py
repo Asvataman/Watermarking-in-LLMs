@@ -1,194 +1,80 @@
 import streamlit as st
-import pandas as pd
-import matplotlib.pyplot as plt
-import numpy as np
-from typing import Dict, List, Optional
+from typing import Dict
 
-def create_detection_panel():
-    """
-    Create a detection panel for analyzing arbitrary text.
+class DetectionPanel:
+    """Standalone detection panel for analyzing text for watermarks."""
     
-    This panel allows users to input text and analyze it for watermarks
-    independently of the chat interface.
-    """
-    st.header("Watermark Detector")
-    st.markdown("""
-    Paste text below to analyze it for the presence of the watermark.
-    """)
-    
-    # Text input area
-    text_to_analyze = st.text_area(
-        "Text to analyze",
-        height=200,
-        help="Paste text here to check for watermarks"
-    )
-    
-    # Analysis parameters
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        seed = st.number_input(
-            "Watermark Seed",
-            min_value=1,
-            max_value=100000,
-            value=st.session_state.get("watermark_seed", 42),
-            help="Secret key seed for watermark detection (must match the seed used for watermarking)"
-        )
-    
-    with col2:
-        gamma = st.slider(
-            "Gamma",
-            min_value=0.1,
-            max_value=0.9,
-            value=st.session_state.get("watermark_gamma", 0.5),
-            step=0.1,
-            help="Fraction of tokens expected to be 'green'"
-        )
-    
-    # Analyze button
-    analyze_button = st.button("Analyze Text")
-    
-    # Perform analysis when button is clicked
-    if analyze_button and text_to_analyze:
-        from watermarking.detector import WatermarkDetector
+    def __init__(self, detector):
+        """
+        Initialize the detection panel.
         
-        # Create detector with the specified parameters
-        detector = WatermarkDetector(
-            seed=seed,
-            gamma=gamma,
-            z_threshold=st.session_state.get("z_threshold", 4.0)
+        Args:
+            detector: WatermarkDetector instance
+        """
+        self.detector = detector
+    
+    def render(self):
+        """Render the detection panel."""
+        st.markdown("## Watermark Detection Tool")
+        st.markdown(
+            "Use this tool to analyze any text and check if it contains a watermark. "
+            "Paste text from any source (including other language models) to analyze it."
         )
         
-        # Analyze the text
-        with st.spinner("Analyzing text..."):
-            analysis = detector.analyze_text_segments(text_to_analyze)
-            
-        # Display results
-        display_analysis_results(analysis)
-
-
-def display_analysis_results(analysis: Dict):
-    """
-    Display the watermark analysis results.
-    
-    Args:
-        analysis: Analysis results from the detector
-    """
-    st.subheader("Analysis Results")
-    
-    # Overall result
-    overall = analysis["overall"]
-    
-    # Determine result color and text
-    if overall["is_watermarked"]:
-        result_color = "green"
-        result_text = "WATERMARK DETECTED"
-        emoji = "✅"
-    else:
-        result_color = "red"
-        result_text = "NO WATERMARK DETECTED"
-        emoji = "❌"
-    
-    # Display the result with colored box
-    st.markdown(
-        f"""
-        <div style="padding: 20px; background-color: {'rgba(0, 255, 0, 0.1)' if overall['is_watermarked'] else 'rgba(255, 0, 0, 0.1)'}; 
-                    border-radius: 10px; border: 2px solid {result_color}; margin-bottom: 20px;">
-            <h2 style="color: {result_color}; margin: 0;">{result_text} {emoji}</h2>
-            <h3>Confidence: {overall['confidence']:.2f}%</h3>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-    
-    # Create columns for metrics
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        st.metric("Z-score", f"{overall['z_score']:.3f}")
-    
-    with col2:
-        st.metric("p-value", f"{overall['p_value']:.6f}")
-    
-    with col3:
-        st.metric("Total Tokens", overall['total_tokens'])
-    
-    # Green vs Red tokens
-    st.subheader("Token Distribution")
-    
-    # Create a donut chart for green vs red tokens
-    fig, ax = plt.subplots(figsize=(6, 4))
-    
-    # Data for pie chart
-    green = overall["green_count"]
-    red = overall["red_count"]
-    
-    # Create pie chart
-    ax.pie(
-        [green, red], 
-        labels=['Green Tokens', 'Red Tokens'],
-        autopct='%1.1f%%',
-        startangle=90,
-        colors=['green', 'red'],
-        wedgeprops=dict(width=0.5)
-    )
-    ax.axis('equal')  # Equal aspect ratio ensures that pie is drawn as a circle
-    
-    # Display the chart
-    st.pyplot(fig)
-    
-    # Display segment analysis if multiple segments exist
-    if len(analysis["segments"]) > 1:
-        st.subheader("Segment Analysis")
+        text_to_analyze = st.text_area(
+            "Paste text to analyze for watermarks", 
+            height=200, 
+            help="Enter text to check for watermarks"
+        )
         
-        # Create a dataframe for the segments
-        segment_data = []
-        for i, segment in enumerate(analysis["segments"]):
-            segment_data.append({
-                "Segment": i + 1,
-                "Start Token": segment["start_token"],
-                "End Token": segment["end_token"],
-                "Watermarked": "Yes" if segment["is_watermarked"] else "No",
-                "Confidence (%)": f"{segment['confidence']:.2f}",
-                "Z-score": f"{segment['z_score']:.2f}"
-            })
-        
-        # Display as a table
-        df = pd.DataFrame(segment_data)
-        st.dataframe(df, hide_index=True)
-        
-        # Create a chart of segment confidence scores
-        fig, ax = plt.subplots(figsize=(10, 4))
-        segments = analysis["segments"]
-        x = np.arange(len(segments))
-        confidences = [segment["confidence"] for segment in segments]
-        
-        # Create the bar chart
-        bars = ax.bar(x, confidences, color=['green' if c > 50 else 'red' for c in confidences])
-        ax.set_xlabel('Text Segment')
-        ax.set_ylabel('Confidence %')
-        ax.set_title('Watermark Confidence by Text Segment')
-        ax.set_ylim(0, 100)
-        
-        # Add a horizontal line at the detection threshold
-        threshold = 50
-        ax.axhline(y=threshold, color='gray', linestyle='--', alpha=0.7)
-        
-        st.pyplot(fig)
-        
-        # Show the most confident segment
-        if any(segment["is_watermarked"] for segment in segments):
-            st.subheader("Most Confident Watermarked Segment")
-            
-            # Find the segment with the highest confidence that is watermarked
-            watermarked_segments = [s for s in segments if s["is_watermarked"]]
-            if watermarked_segments:
-                most_confident = max(watermarked_segments, key=lambda s: s["confidence"])
+        if st.button("Analyze Text"):
+            if not text_to_analyze:
+                st.warning("Please enter some text to analyze.")
+                return
                 
-                st.markdown(f"""
-                **Confidence:** {most_confident['confidence']:.2f}%  
-                **Z-score:** {most_confident['z_score']:.2f}  
-                """)
+            with st.spinner("Analyzing..."):
+                # Run detection
+                detection_result = self.detector.detect(text_to_analyze)
                 
-                with st.expander("View Segment Text"):
-                    st.markdown(most_confident["text"])
+                # Display results
+                cols = st.columns(2)
+                
+                with cols[0]:
+                    st.markdown("### Detection Results")
+                    st.markdown(f"**Is Watermarked:** {'Yes' if detection_result['is_watermarked'] else 'No'}")
+                    st.markdown(f"**Z-Score:** {detection_result['z_score']:.2f}")
+                    st.markdown(f"**P-Value:** {detection_result['p_value']:.8f}")
+                    st.markdown(f"**Green Tokens:** {detection_result['green_token_count']} / {detection_result['total_tokens']} "
+                              f"({detection_result['green_token_count']/detection_result['total_tokens']*100:.1f}%)")
+                    st.markdown(f"**Expected Green Tokens:** {detection_result['expected_green_count']:.1f}")
+                
+                with cols[1]:
+                    if detection_result["visualization"]:
+                        st.image(f"data:image/png;base64,{detection_result['visualization']}")
+                
+                # Display highlighted text
+                st.markdown("### Highlighted Text (Green Tokens)")
+                highlighted_text = self.detector.get_highlighted_text(text_to_analyze, detection_result)
+                st.markdown(highlighted_text, unsafe_allow_html=True)
+                
+                # Interpretation
+                st.markdown("### Interpretation")
+                if detection_result["is_watermarked"]:
+                    st.success(
+                        "This text contains a statistically significant pattern consistent with our watermark. "
+                        f"The z-score of {detection_result['z_score']:.2f} exceeds our detection threshold, "
+                        f"with a p-value of {detection_result['p_value']:.8f}. "
+                        "This suggests the text was likely generated by a watermarked language model."
+                    )
+                else:
+                    if detection_result["z_score"] > 2.0:
+                        st.info(
+                            f"This text shows some pattern (z-score: {detection_result['z_score']:.2f}), but it's "
+                            "below our detection threshold. This might be human-written text with a coincidental pattern, "
+                            "or watermarked text that has been heavily edited."
+                        )
+                    else:
+                        st.info(
+                            "No watermark detected. This text is likely human-written or generated "
+                            "by a model without this specific watermarking scheme."
+                        )

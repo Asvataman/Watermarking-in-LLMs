@@ -1,179 +1,149 @@
 import numpy as np
 import hashlib
 import tiktoken
-from typing import List, Dict, Tuple, Set, Optional
-from config.setting import DEFAULT_GAMMA, DEFAULT_DELTA, DEFAULT_SEED, VOCABULARY_SIZE
+import os
+from typing import List, Dict, Tuple, Optional
 
 class Watermarker:
     """
-    Implements the watermarking technique described in "A Watermark for Large Language Models"
-    by Kirchenbauer et al. (2023).
+    Implementation of the watermarking technique described in "A Watermark for Large Language Models"
+    by Kirchenbauer et al.
     
-    The watermarking algorithm works by:
-    1. Using a secret key to divide the vocabulary into "green" and "red" tokens
-    2. Biasing the model's output distribution to slightly prefer "green" tokens
-    3. Statistically analyzing token distributions to detect the watermark
+    This class adds a "soft watermark" to LLM outputs by biasing the logits of a random subset of tokens
+    during generation.
     """
     
     def __init__(
-        self, 
-        vocabulary_size: int = VOCABULARY_SIZE,
-        gamma: float = DEFAULT_GAMMA,
-        delta: float = DEFAULT_DELTA,
-        seed: Optional[int] = DEFAULT_SEED,
-        encoding_name: str = "cl100k_base"  # GPT-4 tokenizer
+        self,
+        gamma: float = 0.5,
+        delta: float = 2.0,
+        context_width: int = 1,
+        seed: int = 42,
+        tokenizer_name: str = "cl100k_base"  # Default for GPT-4 models
     ):
         """
         Initialize the watermarker.
         
         Args:
-            vocabulary_size: Size of the model's vocabulary
-            gamma: Fraction of tokens to mark as "green" (watermark tokens)
-            delta: Logit bias to apply to green tokens
-            seed: Random seed for watermark key
-            encoding_name: Name of the tokenizer encoding
+            gamma: Proportion of tokens to include in the "green list" (0-1)
+            delta: Logit bias to add to green list tokens
+            context_width: Number of previous tokens to use for generating the hash
+            seed: Seed for the hash function
+            tokenizer_name: Tiktoken encoding to use for tokenization
         """
-        self.vocabulary_size = vocabulary_size
         self.gamma = gamma
         self.delta = delta
-        self.seed = seed if seed is not None else np.random.randint(0, 2**32 - 1)
-        self.encoding = tiktoken.get_encoding(encoding_name)
+        self.context_width = context_width
+        self.seed = seed
+        self.tokenizer = tiktoken.get_encoding(tokenizer_name)
+        self.vocab_size = self.tokenizer.n_vocab
         
-        # Secret key for the watermark
-        self.watermark_key = self._generate_key()
-        
-    def _generate_key(self) -> bytes:
-        """Generate a secret key for the watermark."""
-        return hashlib.sha256(str(self.seed).encode()).digest()
-    
-    def _get_green_tokens(self, prev_tokens: List[int]) -> Set[int]:
+    def _get_green_tokens(self, prev_tokens: List[int]) -> List[int]:
         """
-        Determine which tokens are "green" (watermark tokens) based on previous tokens.
+        Generate the "green list" of tokens based on previous tokens.
         
         Args:
-            prev_tokens: List of token IDs of previously generated tokens
-        
-        Returns:
-            Set of token IDs marked as "green"
-        """
-        if not prev_tokens:
-            # Use default seed if no previous context
-            hash_input = self.watermark_key
-        else:
-            # Use the last token (or a window of tokens) to seed the hash
-            context = str(prev_tokens[-1]).encode()
-            hash_input = hashlib.sha256(self.watermark_key + context).digest()
-        
-        # Use the hash to seed a random number generator
-        rng = np.random.RandomState(int.from_bytes(hash_input[:4], byteorder='big'))
-        
-        # Randomly select gamma fraction of tokens as "green"
-        green_size = int(self.gamma * self.vocabulary_size)
-        green_tokens = set(rng.choice(self.vocabulary_size, size=green_size, replace=False))
-        
-        return green_tokens
-    
-    def apply_watermark(self, logits: np.ndarray, prev_tokens: List[int]) -> np.ndarray:
-        """
-        Apply the watermark by modifying the logits for green tokens.
-        
-        Args:
-            logits: Original model logits (vocabulary size)
-            prev_tokens: List of token IDs of previously generated tokens
+            prev_tokens: List of previous token IDs
             
         Returns:
-            Modified logits with watermark applied
+            List of token IDs in the green list
         """
-        green_tokens = self._get_green_tokens(prev_tokens)
-        modified_logits = logits.copy()
+        # Only use the most recent context_width tokens
+        context = prev_tokens[-self.context_width:]
         
-        # Apply the bias to green tokens
-        for token_id in green_tokens:
-            if token_id < len(modified_logits):
-                modified_logits[token_id] += self.delta
-                
-        return modified_logits
+        # Create a deterministic hash from the previous tokens
+        context_str = ",".join([str(t) for t in context])
+        hash_input = f"{context_str}_{self.seed}"
+        hash_bytes = hashlib.sha256(hash_input.encode()).digest()
+        
+        # Use the hash to seed the random number generator
+        # Ensure seed is within valid range (0 to 2^32 - 1)
+        seed_value = int.from_bytes(hash_bytes[:4], byteorder='big') % (2**32 - 1)
+        rng = np.random.RandomState(seed_value)
+        
+        # Randomly select tokens for the green list
+        num_green = int(self.gamma * self.vocab_size)
+        green_tokens = rng.choice(self.vocab_size, size=num_green, replace=False)
+        
+        return green_tokens.tolist()
     
-    def tokenize(self, text: str) -> List[int]:
-        """Tokenize text using the model's tokenizer."""
-        return self.encoding.encode(text)
-    
-    def detokenize(self, tokens: List[int]) -> str:
-        """Convert tokens back to text."""
-        return self.encoding.decode(tokens)
-
-    def get_watermark_status(self) -> Dict:
-        """Return the current watermark parameters as a dictionary."""
-        return {
-            "enabled": True,
-            "gamma": self.gamma,
-            "delta": self.delta,
-            "seed": self.seed
-        }
-
-
-class AzureWatermarkedClient:
-    """
-    Wrapper around Azure OpenAI client that applies watermarking to the generated text.
-    """
-    
-    def __init__(self, azure_client, watermarker: Watermarker):
+    def prepare_logit_biases(self, prev_tokens: List[int]) -> Dict[int, float]:
         """
-        Initialize the watermarked client.
+        Prepare the logit biases for the next token generation.
         
         Args:
-            azure_client: Azure OpenAI client
-            watermarker: Watermarker instance
+            prev_tokens: List of previous token IDs
+            
+        Returns:
+            Dictionary mapping token IDs to their logit biases
         """
-        self.azure_client = azure_client
-        self.watermarker = watermarker
-        self.watermarking_enabled = True
+        if not prev_tokens:
+            return {}
+            
+        green_tokens = self._get_green_tokens(prev_tokens)
         
-    def toggle_watermarking(self, enabled: bool = True):
-        """Toggle watermarking on or off."""
-        self.watermarking_enabled = enabled
+        # Azure OpenAI API limits logit_bias to 300 entries (stricter than regular OpenAI API)
+        max_logit_bias_entries = 300
         
-    async def generate_completion(self, messages, **kwargs):
+        # If green list is larger than API limit, randomly sample tokens
+        if len(green_tokens) > max_logit_bias_entries:
+            # Generate a seed that's within the valid range (0 to 2^32 - 1)
+            seed_value = (self.seed + hash(str(prev_tokens[-1]))) % (2**32 - 1)
+            rng = np.random.RandomState(int(seed_value))
+            green_tokens = rng.choice(green_tokens, size=max_logit_bias_entries, replace=False).tolist()
+        
+        # Create a dictionary of logit biases for the green tokens
+        logit_biases = {token_id: self.delta for token_id in green_tokens}
+        
+        print(f"Applied watermark with {len(logit_biases)} biased tokens (max allowed: 300)")
+        return logit_biases
+    
+    def generate_with_watermark(self, client, messages, max_tokens=500, **kwargs):
         """
-        Generate a completion with watermarking applied.
+        Generate text with the Azure OpenAI API while applying the watermark.
         
-        This is a simplified implementation. In practice, you would need to
-        integrate with the Azure OpenAI client's tokenizer and modify the
-        sampling distribution directly, which may require custom API access.
-        
-        For this POC, we apply a logit bias to implement the watermark, which is
-        a simplified version of the approach described in the paper.
+        Args:
+            client: Azure OpenAI API client
+            messages: List of message dictionaries to send to the API
+            max_tokens: Maximum number of tokens to generate
+            **kwargs: Additional arguments to pass to the API
+            
+        Returns:
+            Generated response with watermark
         """
-        if not self.watermarking_enabled:
-            # If watermarking is disabled, just pass through to the Azure client
-            return await self.azure_client.get_chat_response(
+        # Initialize with the system message if present
+        prev_tokens = []
+        if messages and messages[0]['role'] == 'system':
+            system_tokens = self.tokenizer.encode(messages[0]['content'])
+            prev_tokens.extend(system_tokens)
+        
+        # Add all user/assistant messages
+        for message in messages:
+            if message['role'] != 'system':  # Skip system message (already processed)
+                msg_tokens = self.tokenizer.encode(message['content'])
+                prev_tokens.extend(msg_tokens)
+        
+        # Prepare logit biases
+        logit_biases = self.prepare_logit_biases(prev_tokens)
+        
+        try:
+            # Generate with watermark
+            response = client.chat.completions.create(
                 messages=messages,
+                max_tokens=max_tokens,
+                logit_bias=logit_biases,
                 **kwargs
             )
-        
-        # For watermarking, we need to identify green tokens and apply logit biases
-        # Extract the last message to determine context
-        last_message_content = messages[-1]["content"] if messages else ""
-        prev_tokens = self.watermarker.tokenize(last_message_content)
-        
-        # Get green tokens for this context
-        green_tokens = self.watermarker._get_green_tokens(prev_tokens)
-        
-        # Convert to logit_bias format for OpenAI API
-        # This is a simplified approach; the paper's method would require more direct access
-        logit_bias = {}
-        for token in green_tokens:
-            if token < self.watermarker.vocabulary_size:
-                logit_bias[str(token)] = self.watermarker.delta
-        
-        # Add logit bias to kwargs
-        if "logit_bias" in kwargs:
-            kwargs["logit_bias"].update(logit_bias)
-        else:
-            kwargs["logit_bias"] = logit_bias
-        
-        # Generate completion with the biased distribution
-        return await self.azure_client.get_chat_response(
-            messages=messages,
-            **kwargs
-        )
+            print("Successfully generated watermarked response")
+            return response
+        except Exception as e:
+            print(f"Error in watermarked generation: {e}")
+            print(f"Falling back to generation without watermark")
+            
+            # Fall back to generation without watermark
+            response = client.chat.completions.create(
+                messages=messages,
+                max_tokens=max_tokens,
+                **kwargs
+            )
+            return response

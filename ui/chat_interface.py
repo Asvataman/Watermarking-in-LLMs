@@ -1,205 +1,263 @@
 import streamlit as st
+from typing import List, Dict, Tuple, Optional
 import time
-from typing import List, Dict, Any, Optional, Callable, Awaitable
-import asyncio
+from watermarking import Watermarker, WatermarkDetector
+from utils import get_azure_client, preprocess_text
+from config import (
+    AZURE_OPENAI_DEPLOYMENT_NAME,
+    WATERMARK_GAMMA,
+    WATERMARK_DELTA,
+    WATERMARK_SEED,
+    DETECTION_THRESHOLD
+)
 
-def initialize_chat_state():
-    """Initialize the chat-related session state variables."""
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
+class ChatInterface:
+    """Streamlit chat interface for interacting with the watermarked LLM."""
     
-    if "processing" not in st.session_state:
-        st.session_state.processing = False
-        
-    if "watermarking_enabled" not in st.session_state:
-        st.session_state.watermarking_enabled = True
-
-
-def display_chat_messages():
-    """Display all messages in the chat history with watermark analysis buttons."""
-    for i, message in enumerate(st.session_state.messages):
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+    def __init__(self):
+        """Initialize the chat interface."""
+        # Initialize chat history in session state if not already present
+        if "messages" not in st.session_state:
+            st.session_state.messages = []
             
-            # Add "Check Watermark" button for assistant messages
-            if message["role"] == "assistant":
-                button_key = f"check_watermark_{i}"
+        if "watermark_enabled" not in st.session_state:
+            st.session_state.watermark_enabled = False
+            
+        if "detection_results" not in st.session_state:
+            st.session_state.detection_results = {}
+            
+        # Initialize OpenAI client
+        self.client = get_azure_client()
+        
+        # Initialize watermarker and detector
+        self.watermarker = Watermarker(
+            gamma=WATERMARK_GAMMA,
+            delta=WATERMARK_DELTA,
+            seed=WATERMARK_SEED
+        )
+        
+        self.detector = WatermarkDetector(
+            gamma=WATERMARK_GAMMA,
+            seed=WATERMARK_SEED,
+            threshold=DETECTION_THRESHOLD
+        )
+    
+    def render(self):
+        """Render the chat interface."""
+        # Display chat header
+        st.markdown("### Azure GPT-4o Chat")
+        
+        # Display chat messages
+        for message in st.session_state.messages:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
                 
-                # Create a unique key for the analysis state
-                analysis_key = f"analysis_{i}"
-                if analysis_key not in st.session_state:
-                    st.session_state[analysis_key] = None
+                # Add detection panel for assistant messages
+                if message["role"] == "assistant" and message.get("detection_result"):
+                    self._render_detection_panel(message["detection_result"], message["content"])
+        
+        # Chat input with watermark toggle
+        st.markdown("---")
+        cols = st.columns([8, 2])
+        
+        with cols[1]:
+            watermark_enabled = st.toggle("Enable Watermark", value=st.session_state.watermark_enabled)
+            if watermark_enabled != st.session_state.watermark_enabled:
+                st.session_state.watermark_enabled = watermark_enabled
                 
-                # Check if analysis already exists
-                if st.session_state[analysis_key] is not None:
-                    # Display the analysis result
-                    with st.sidebar:
-                        display_watermark_analysis(message["content"], st.session_state[analysis_key])
+            if watermark_enabled:
+                st.caption("Using soft watermarking (γ={}, δ={})".format(WATERMARK_GAMMA, WATERMARK_DELTA))
+                # Remove tooltip call that was causing the error
+        
+        # Chat input
+        if prompt := st.chat_input("Type your message here..."):
+            # Add user message to chat history
+            st.session_state.messages.append({"role": "user", "content": prompt})
+            
+            # Display user message
+            with st.chat_message("user"):
+                st.markdown(prompt)
+            
+            # Generate and display assistant response
+            with st.chat_message("assistant"):
+                message_placeholder = st.empty()
                 
-                # Add the button
-                if st.button("Check Watermark", key=button_key):
-                    # Set the analysis state
-                    from watermarking.detector import WatermarkDetector
-                    detector = WatermarkDetector(
-                        seed=st.session_state.get("watermark_seed", 42),
-                        gamma=st.session_state.get("watermark_gamma", 0.5)
-                    )
-                    analysis = detector.analyze_text_segments(message["content"])
-                    st.session_state[analysis_key] = analysis
+                with st.spinner("Thinking..."):
+                    response = self._generate_response(prompt)
+                
+                # Display response
+                message_placeholder.markdown(response["content"])
+                
+                # Add detection panel
+                if response.get("detection_result"):
+                    self._render_detection_panel(response["detection_result"], response["content"])
+                
+                # Add assistant message to chat history
+                st.session_state.messages.append(response)
+    
+    def _generate_response(self, prompt: str) -> Dict:
+        """
+        Generate a response from the model with optional watermarking.
+        
+        Args:
+            prompt: User's input prompt
+            
+        Returns:
+            Dictionary with response content and detection result
+        """
+        # Prepare messages for the API
+        messages = []
+        
+        # Add previous messages for context
+        for message in st.session_state.messages:
+            messages.append({"role": message["role"], "content": message["content"]})
+        
+        # Generate response
+        start_time = time.time()
+        response_text = ""
+        watermark_status = "disabled"
+        
+        try:
+            if st.session_state.watermark_enabled:
+                # Try to generate with watermarking
+                try:
+                    with st.spinner("Generating response with watermark..."):
+                        response = self.watermarker.generate_with_watermark(
+                            client=self.client,
+                            messages=messages,
+                            temperature=0.7,
+                            max_tokens=1000,
+                            stream=False,
+                            model=AZURE_OPENAI_DEPLOYMENT_NAME
+                        )
+                        response_text = response.choices[0].message.content
+                        watermark_status = "enabled"
+                except Exception as e:
+                    st.error(f"Error with watermarking: {str(e)}")
+                    st.info("Falling back to generation without watermark")
                     
-                    # Force a rerun to display the analysis
-                    st.rerun()
-
-
-async def process_user_input(
-    user_input: str,
-    get_response_func: Callable[[List[Dict[str, str]]], Awaitable[str]]
-):
-    """
-    Process user input, get AI response, and update chat history.
-    
-    Args:
-        user_input: User's input text
-        get_response_func: Async function to get AI response
-    """
-    if not user_input or st.session_state.processing:
-        return
-    
-    # Set processing flag
-    st.session_state.processing = True
-    
-    # Add user message to chat
-    st.session_state.messages.append({"role": "user", "content": user_input})
-    
-    # Get AI response
-    try:
-        response = await get_response_func(st.session_state.messages)
+                    # Fall back to non-watermarked generation
+                    response = self.client.chat.completions.create(
+                        model=AZURE_OPENAI_DEPLOYMENT_NAME,
+                        messages=messages,
+                        temperature=0.7,
+                        max_tokens=1000,
+                        stream=False
+                    )
+                    response_text = response.choices[0].message.content
+                    watermark_status = "failed"
+            else:
+                # Generate without watermarking
+                response = self.client.chat.completions.create(
+                    model=AZURE_OPENAI_DEPLOYMENT_NAME,
+                    messages=messages,
+                    temperature=0.7,
+                    max_tokens=1000,
+                    stream=False
+                )
+                response_text = response.choices[0].message.content
+        except Exception as e:
+            st.error(f"API Error: {str(e)}")
+            response_text = f"I'm sorry, but there was an error generating a response. Please try again later.\n\nError details: {str(e)}"
+            watermark_status = "error"
         
-        # Add AI response to chat
-        st.session_state.messages.append({"role": "assistant", "content": response})
-    except Exception as e:
-        st.error(f"Error generating response: {str(e)}")
-    finally:
-        # Reset processing flag
-        st.session_state.processing = False
-
-
-def create_chat_input(on_submit_func):
-    """
-    Create the chat input component.
-    
-    Args:
-        on_submit_func: Function to call when input is submitted
-    """
-    # Create the input box
-    user_input = st.chat_input(
-        "Ask something...",
-        disabled=st.session_state.processing
-    )
-    
-    # Process input if provided
-    if user_input:
-        asyncio.run(on_submit_func(user_input))
-
-
-def display_watermark_analysis(text: str, analysis: Dict):
-    """
-    Display watermark analysis results in the sidebar.
-    
-    Args:
-        text: Text that was analyzed
-        analysis: Analysis results from the detector
-    """
-    st.sidebar.header("Watermark Analysis")
-    
-    # Display overall result
-    st.sidebar.subheader("Overall Analysis")
-    overall = analysis["overall"]
-    
-    # Determine the result color
-    if overall["is_watermarked"]:
-        result_color = "green"
-        result_text = "WATERMARK DETECTED ✓"
-    else:
-        result_color = "red"
-        result_text = "NO WATERMARK DETECTED ✗"
-    
-    # Display the result with colored box
-    st.sidebar.markdown(
-        f"""
-        <div style="padding: 10px; background-color: {'rgba(0, 255, 0, 0.1)' if overall['is_watermarked'] else 'rgba(255, 0, 0, 0.1)'}; 
-                    border-radius: 5px; border: 1px solid {result_color};">
-            <h3 style="color: {result_color}; margin: 0;">{result_text}</h3>
-            <p>Confidence: {overall['confidence']:.2f}%</p>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-    
-    # Display statistics
-    st.sidebar.markdown("""
-    ### Statistical Analysis
-    """)
-    
-    col1, col2 = st.sidebar.columns(2)
-    col1.metric("Z-score", f"{overall['z_score']:.2f}")
-    col2.metric("p-value", f"{overall['p_value']:.4f}")
-    
-    col1, col2 = st.sidebar.columns(2)
-    col1.metric("Green tokens", overall["green_count"])
-    col2.metric("Red tokens", overall["red_count"])
-    
-    st.sidebar.metric("Total tokens analyzed", overall["analyzed_pairs"])
-    
-    # Show detailed segment analysis
-    if len(analysis["segments"]) > 1:
-        st.sidebar.markdown("### Segment Analysis")
+        # Detect watermark in the response
+        detection_result = self.detector.detect(response_text)
         
-        # Create a chart of segment confidence scores
-        import matplotlib.pyplot as plt
-        import numpy as np
+        generation_time = time.time() - start_time
         
-        fig, ax = plt.subplots(figsize=(8, 3))
-        segments = analysis["segments"]
-        x = np.arange(len(segments))
-        confidences = [segment["confidence"] for segment in segments]
+        return {
+            "role": "assistant",
+            "content": response_text,
+            "detection_result": {
+                **detection_result,
+                "watermark_enabled": st.session_state.watermark_enabled,
+                "watermark_status": watermark_status,
+                "generation_time": generation_time
+            }
+        }
+    
+    def _render_detection_panel(self, detection_result: Dict, content: str):
+        """
+        Render the watermark detection panel.
         
-        # Create the bar chart
-        bars = ax.bar(x, confidences, color=['green' if c > 50 else 'red' for c in confidences])
-        ax.set_xlabel('Text Segment')
-        ax.set_ylabel('Confidence %')
-        ax.set_title('Watermark Confidence by Text Segment')
-        ax.set_ylim(0, 100)
+        Args:
+            detection_result: Detection result dictionary
+            content: Original text content
+        """
+        # Import scipy.stats here to avoid NameError
+        from scipy import stats
         
-        # Add a horizontal line at the detection threshold
-        threshold = 50
-        ax.axhline(y=threshold, color='gray', linestyle='--', alpha=0.7)
-        
-        st.sidebar.pyplot(fig)
-        
-        # Show the most confident segment
-        if any(segment["is_watermarked"] for segment in segments):
-            st.sidebar.markdown("### Most Confident Watermarked Segment")
+        # Create expander for detection details
+        with st.expander("Inspect Response (Watermark Detection)"):
+            cols = st.columns(2)
             
-            # Find the segment with the highest confidence that is watermarked
-            watermarked_segments = [s for s in segments if s["is_watermarked"]]
-            if watermarked_segments:
-                most_confident = max(watermarked_segments, key=lambda s: s["confidence"])
+            with cols[0]:
+                st.markdown("#### Watermark Detection")
                 
-                st.sidebar.markdown(f"""
-                **Confidence:** {most_confident['confidence']:.2f}%  
-                **Z-score:** {most_confident['z_score']:.2f}  
-                **Text excerpt:**
-                """)
+                # Show watermark status
+                if detection_result.get('watermark_status') == "enabled":
+                    st.success("✅ Watermarking: Enabled and working")
+                elif detection_result.get('watermark_status') == "failed":
+                    st.warning("⚠️ Watermarking: Attempted but failed, fell back to normal generation")
+                elif detection_result.get('watermark_status') == "error":
+                    st.error("❌ Watermarking: Error in generation")
+                else:
+                    st.info("ℹ️ Watermarking: Disabled")
                 
-                # Truncate if too long
-                excerpt = most_confident["text"]
-                if len(excerpt) > 300:
-                    excerpt = excerpt[:300] + "..."
+                # Detection results
+                st.markdown(f"**Is Watermarked:** {'Yes' if detection_result['is_watermarked'] else 'No'}")
+                st.markdown(f"**Z-Score:** {detection_result['z_score']:.2f}")
+                st.markdown(f"**P-Value:** {detection_result['p_value']:.8f}")
                 
-                st.sidebar.markdown(f"> {excerpt}")
-    
-    # Add a close button
-    if st.sidebar.button("Close Analysis"):
-        st.session_state[f"analysis_{len(st.session_state.messages) - 1}"] = None
-        st.rerun()
+                # Only calculate percentage if total_tokens > 0
+                if detection_result['total_tokens'] > 0:
+                    percentage = detection_result['green_token_count'] / detection_result['total_tokens'] * 100
+                    st.markdown(f"**Green Tokens:** {detection_result['green_token_count']} / {detection_result['total_tokens']} "
+                               f"({percentage:.1f}%)")
+                else:
+                    st.markdown(f"**Green Tokens:** {detection_result['green_token_count']} / {detection_result['total_tokens']}")
+                
+                st.markdown(f"**Expected Green Tokens:** {detection_result['expected_green_count']:.1f} "
+                           f"({WATERMARK_GAMMA * 100:.1f}%)")
+                st.markdown(f"**Generation Time:** {detection_result['generation_time']:.2f} seconds")
+                
+                # Threshold explanation with proper import
+                st.markdown(f"**Detection Threshold:** z-score > {DETECTION_THRESHOLD} (p < {1 - stats.norm.cdf(DETECTION_THRESHOLD):.8f})")
+            
+            with cols[1]:
+                if detection_result["visualization"]:
+                    st.image(f"data:image/png;base64,{detection_result['visualization']}")
+                else:
+                    st.info("Visualization not available (text too short for reliable detection)")
+            
+            # Display interpretation
+            st.markdown("#### Interpretation")
+            if detection_result['is_watermarked']:
+                st.success(
+                    "📝 This text shows a statistically significant watermark pattern (z-score > {:.1f}). "
+                    "There is strong evidence that this was generated with watermarking enabled."
+                    .format(DETECTION_THRESHOLD)
+                )
+            elif detection_result['z_score'] > 2.0:
+                st.info(
+                    "🔍 This text shows some pattern (z-score: {:.2f}), but it's below our detection threshold ({:.1f}). "
+                    "This might indicate watermarking that has been modified or diluted."
+                    .format(detection_result['z_score'], DETECTION_THRESHOLD)
+                )
+            else:
+                if detection_result.get('watermark_status') == "enabled":
+                    st.info(
+                        "🔍 No significant watermark pattern detected despite watermarking being enabled. "
+                        "This could be due to an API limitation that caused fallback to non-watermarked generation, "
+                        "or because the text contains mostly low-entropy tokens that are less influenced by watermarking."
+                    )
+                else:
+                    st.info(
+                        "🔍 No significant watermark pattern detected. This text was likely generated without watermarking."
+                    )
+            
+            # Display highlighted text
+            st.markdown("#### Highlighted Response (Green Tokens)")
+            highlighted_text = self.detector.get_highlighted_text(content, detection_result)
+            st.markdown(highlighted_text, unsafe_allow_html=True)
